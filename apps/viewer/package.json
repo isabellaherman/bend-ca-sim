@@ -1,0 +1,17 @@
+{
+  "name": "@ca-sim/viewer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@ca-sim/contracts": "0.1.0"
+  },
+  "devDependencies": {
+    "vite": "^7.3.1"
+  }
+}

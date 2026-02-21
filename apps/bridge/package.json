@@ -1,0 +1,17 @@
+{
+  "name": "@ca-sim/bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --import tsx ./src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test \"src/**/*.test.ts\""
+  },
+  "dependencies": {
+    "@ca-sim/contracts": "0.1.0",
+    "@ca-sim/reference": "0.1.0",
+    "ws": "^8.18.0"
+  }
+}

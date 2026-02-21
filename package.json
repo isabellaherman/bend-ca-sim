@@ -1,0 +1,29 @@
+{
+  "name": "ca-sim",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "engine/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:bridge": "npm --workspace @ca-sim/bridge run dev",
+    "dev:viewer": "npm --workspace @ca-sim/viewer run dev",
+    "typecheck": "npm -ws run typecheck",
+    "build": "npm -ws run build",
+    "test": "npm -ws --if-present run test",
+    "parity": "node --import tsx ./scripts/parity.ts",
+    "bench": "node --import tsx ./scripts/bench.ts"
+  },
+  "dependencies": {
+    "@ca-sim/bend": "0.1.0",
+    "@ca-sim/contracts": "0.1.0",
+    "@ca-sim/reference": "0.1.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}
