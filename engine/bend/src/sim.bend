@@ -178,7 +178,7 @@ def pick_spawn(f, w, g, threshold, seed, tick, idx):
 
   return 0
 
-def compute_next_cell(cells, width, height, idx, seed, tick, repro_threshold, max_energy, spawn_energy, threat_penalty, ally_bonus, prey_bonus, aging_drain):
+def compute_next_cell(cells, width, height, idx, seed, tick, repro_threshold, max_energy, spawn_energy, threat_penalty, ally_bonus, prey_bonus):
   cur = cells[idx]
   open Cell: cur
   counts = neighbor_counts(cells, width, height, idx, cur.typ)
@@ -195,7 +195,7 @@ def compute_next_cell(cells, width, height, idx, seed, tick, repro_threshold, ma
       return Cell { typ: spawn_typ, energy: e, age: 0 }
 
   gain = allies * ally_bonus + prey * prey_bonus
-  loss = threats * threat_penalty + aging_drain
+  loss = threats * threat_penalty + 1
 
   next_energy = cur.energy
   if gain >= loss:
@@ -215,17 +215,17 @@ def compute_next_cell(cells, width, height, idx, seed, tick, repro_threshold, ma
   else:
     return Cell { typ: cur.typ, energy: next_energy, age: cur.age + 1 }
 
-def range_cells(lo, hi, cells, width, height, seed, tick, repro_threshold, max_energy, spawn_energy, threat_penalty, ally_bonus, prey_bonus, aging_drain):
+def range_cells(lo, hi, cells, width, height, seed, tick, repro_threshold, max_energy, spawn_energy, threat_penalty, ally_bonus, prey_bonus):
   if hi <= lo:
     return List/Nil
   else:
     if hi - lo == 1:
-      next_cell = compute_next_cell(cells, width, height, lo, seed, tick, repro_threshold, max_energy, spawn_energy, threat_penalty, ally_bonus, prey_bonus, aging_drain)
+      next_cell = compute_next_cell(cells, width, height, lo, seed, tick, repro_threshold, max_energy, spawn_energy, threat_penalty, ally_bonus, prey_bonus)
       return List/Cons { head: next_cell, tail: List/Nil }
     else:
       mid = (lo + hi) / 2
-      left = range_cells(lo, mid, cells, width, height, seed, tick, repro_threshold, max_energy, spawn_energy, threat_penalty, ally_bonus, prey_bonus, aging_drain)
-      right = range_cells(mid, hi, cells, width, height, seed, tick, repro_threshold, max_energy, spawn_energy, threat_penalty, ally_bonus, prey_bonus, aging_drain)
+      left = range_cells(lo, mid, cells, width, height, seed, tick, repro_threshold, max_energy, spawn_energy, threat_penalty, ally_bonus, prey_bonus)
+      right = range_cells(mid, hi, cells, width, height, seed, tick, repro_threshold, max_energy, spawn_energy, threat_penalty, ally_bonus, prey_bonus)
       return List/concat(left, right)
 
 def list_to_map(xs, idx, out_map):
@@ -288,16 +288,16 @@ def init_cells(idx, size, width, seed, init_mode, alive_ratio_10k, start_energy,
 
   return init_cells(idx + 1, size, width, seed, init_mode, alive_ratio_10k, start_energy, out_map)
 
-def run_ticks(tick, max_ticks, width, height, size, seed, repro_threshold, max_energy, spawn_energy, threat_penalty, ally_bonus, prey_bonus, aging_drain, cells, digests):
+def run_ticks(tick, max_ticks, width, height, size, seed, repro_threshold, max_energy, spawn_energy, threat_penalty, ally_bonus, prey_bonus, cells, digests):
   if tick == max_ticks:
     return List/reverse(digests)
 
   next_tick = tick + 1
-  next_list = range_cells(0, size, cells, width, height, seed, next_tick, repro_threshold, max_energy, spawn_energy, threat_penalty, ally_bonus, prey_bonus, aging_drain)
+  next_list = range_cells(0, size, cells, width, height, seed, next_tick, repro_threshold, max_energy, spawn_energy, threat_penalty, ally_bonus, prey_bonus)
   next_cells = list_to_map(next_list, 0, Map/empty())
   digest = digest_cells(next_list, 8461469)
   digests = List/Cons { head: digest, tail: digests }
-  return run_ticks(next_tick, max_ticks, width, height, size, seed, repro_threshold, max_energy, spawn_energy, threat_penalty, ally_bonus, prey_bonus, aging_drain, next_cells, digests)
+  return run_ticks(next_tick, max_ticks, width, height, size, seed, repro_threshold, max_energy, spawn_energy, threat_penalty, ally_bonus, prey_bonus, next_cells, digests)
 
 def main:
   width = __WIDTH__
@@ -314,8 +314,7 @@ def main:
   threat_penalty = __THREAT_PENALTY__
   ally_bonus = __ALLY_BONUS__
   prey_bonus = __PREY_BONUS__
-  aging_drain = __AGING_DRAIN__
 
   cells = Map/empty()
   cells = init_cells(0, size, width, seed, init_mode, alive_ratio_10k, start_energy, cells)
-  return run_ticks(0, ticks, width, height, size, seed, repro_threshold, max_energy, spawn_energy, threat_penalty, ally_bonus, prey_bonus, aging_drain, cells, List/Nil)
+  return run_ticks(0, ticks, width, height, size, seed, repro_threshold, max_energy, spawn_energy, threat_penalty, ally_bonus, prey_bonus, cells, List/Nil)

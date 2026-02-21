@@ -30,6 +30,8 @@ export interface TickResult {
   digest: string;
 }
 
+const FIXED_AGING_DRAIN10 = 1;
+
 function clampInt(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Math.floor(value)));
 }
@@ -213,9 +215,6 @@ function createSingleBlockInitialState(config: SimConfig): SimStateSoA {
   const types = new Uint8Array(size);
   const energy10 = new Uint16Array(size);
   const age = new Uint16Array(size);
-
-  const centerX = Math.floor(config.width / 2);
-  const centerY = Math.floor(config.height / 2);
   const typeCycle: readonly TypeCode[] = [TYPE_FIRE, TYPE_WATER, TYPE_GRASS];
   const rotation = hashChoice(config.seed, config.width, config.height, 911, 3);
   const rotated: TypeCode[] = [
@@ -246,28 +245,110 @@ function createSingleBlockInitialState(config: SimConfig): SimStateSoA {
     }
   };
 
-  // Three adjacent 3x3 seeds (up to 9 cells/type).
-  paintBlock(centerX - 4, centerY, rotated[0] ?? TYPE_FIRE);
-  paintBlock(centerX, centerY, rotated[1] ?? TYPE_WATER);
-  paintBlock(centerX + 4, centerY, rotated[2] ?? TYPE_GRASS);
+  const minCenterX = 1;
+  const maxCenterX = config.width - 2;
+  const minCenterY = 1;
+  const maxCenterY = config.height - 2;
+  if (minCenterX <= maxCenterX && minCenterY <= maxCenterY) {
+    const rangeX = maxCenterX - minCenterX + 1;
+    const rangeY = maxCenterY - minCenterY + 1;
+    const area = rangeX * rangeY;
+    const minDimension = Math.min(config.width, config.height);
+    const desiredMinDistance = Math.max(6, Math.floor(minDimension / 4));
+    const separationCandidates = [
+      desiredMinDistance,
+      Math.floor(desiredMinDistance * 0.75),
+      Math.floor(desiredMinDistance * 0.5),
+      3,
+      0
+    ].filter((value, index, arr) => value >= 0 && arr.indexOf(value) === index);
+    const centers: Array<{ x: number; y: number; type: TypeCode }> = [];
+    let placedAllBlocks = false;
+
+    for (const minDistance of separationCandidates) {
+      centers.length = 0;
+      let failed = false;
+      for (let i = 0; i < rotated.length; i += 1) {
+        const type = rotated[i] ?? TYPE_EMPTY;
+        if (type === TYPE_EMPTY) {
+          continue;
+        }
+        let placed = false;
+        for (let attempt = 0; attempt < 512; attempt += 1) {
+          const stream = i * 1009 + attempt + 1;
+          const centerX = minCenterX + hashU24Mod(config.seed, type, stream, 947, rangeX);
+          const centerY = minCenterY + hashU24Mod(config.seed, type, stream, 953, rangeY);
+          const overlaps = centers.some((center) => Math.abs(center.x - centerX) <= 2 && Math.abs(center.y - centerY) <= 2);
+          if (overlaps) {
+            continue;
+          }
+          const tooClose = centers.some((center) => {
+            const dx = center.x - centerX;
+            const dy = center.y - centerY;
+            return Math.hypot(dx, dy) < minDistance;
+          });
+          if (tooClose) {
+            continue;
+          }
+          centers.push({ x: centerX, y: centerY, type });
+          placed = true;
+          break;
+        }
+
+        if (placed) {
+          continue;
+        }
+
+        const start = hashU24Mod(config.seed, type, i + 1, 971, area);
+        for (let offset = 0; offset < area; offset += 1) {
+          const flat = (start + offset) % area;
+          const x = minCenterX + (flat % rangeX);
+          const y = minCenterY + Math.floor(flat / rangeX);
+          const overlaps = centers.some((center) => Math.abs(center.x - x) <= 2 && Math.abs(center.y - y) <= 2);
+          if (overlaps) {
+            continue;
+          }
+          const tooClose = centers.some((center) => {
+            const dx = center.x - x;
+            const dy = center.y - y;
+            return Math.hypot(dx, dy) < minDistance;
+          });
+          if (tooClose) {
+            continue;
+          }
+          centers.push({ x, y, type });
+          placed = true;
+          break;
+        }
+
+        if (!placed) {
+          failed = true;
+          break;
+        }
+      }
+
+      if (failed) {
+        continue;
+      }
+      placedAllBlocks = true;
+      break;
+    }
+
+    if (placedAllBlocks) {
+      for (const center of centers) {
+        paintBlock(center.x, center.y, center.type);
+      }
+    }
+  }
 
   // Tiny-grid fallback: guarantee at least one cell per type when possible.
-  const fallbackSpots = [
-    [centerX - 1, centerY],
-    [centerX, centerY],
-    [centerX + 1, centerY],
-    [centerX, centerY - 1],
-    [centerX, centerY + 1]
-  ];
   for (const type of rotated) {
     if ((counts[type] ?? 0) > 0) {
       continue;
     }
-    for (const [x, y] of fallbackSpots) {
-      if (x < 0 || y < 0 || x >= config.width || y >= config.height) {
-        continue;
-      }
-      const idx = y * config.width + x;
+    const start = hashU24Mod(config.seed, type, size, 977, size);
+    for (let offset = 0; offset < size; offset += 1) {
+      const idx = (start + offset) % size;
       if (types[idx] !== TYPE_EMPTY) {
         continue;
       }
@@ -465,7 +546,7 @@ export function stepState(
       threats * -config.constants.threatPenalty10 +
       allies * config.constants.allyBonus10 +
       prey * config.constants.preyBonus10 -
-      config.constants.agingDrain10;
+      FIXED_AGING_DRAIN10;
 
     const currentEnergy = current.energy10[idx] ?? 0;
     const nextEnergy = clampInt(currentEnergy + delta10, 0, maxEnergy10);

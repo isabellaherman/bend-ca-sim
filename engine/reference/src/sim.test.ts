@@ -42,6 +42,14 @@ function countConnectedComponentsByType(state: SimStateSoA, neighbors: Uint32Arr
   return out;
 }
 
+function aliveFootprintSignature(state: SimStateSoA): string {
+  let out = "";
+  for (let i = 0; i < state.types.length; i += 1) {
+    out += state.types[i] === 0 ? "0" : "1";
+  }
+  return out;
+}
+
 test("threat reduces energy and can kill", () => {
   const config = normalizeSimConfig({
     width: 3,
@@ -102,6 +110,115 @@ test("birth in empty cell when threshold met", () => {
   assert.equal(next.state.age[center], 0);
 });
 
+test("alive cell ages and loses fixed 0.1 energy per tick", () => {
+  const config = normalizeSimConfig({
+    width: 3,
+    height: 3,
+    wrapWorld: false,
+    reproThreshold: 8,
+    constants: {
+      maxEnergy10: 50,
+      startEnergy10: 50,
+      spawnEnergy10: 50,
+      threatPenalty10: 0,
+      allyBonus10: 0,
+      preyBonus10: 0,
+      agingDrain10: 99
+    }
+  });
+  const size = config.width * config.height;
+  const state = emptyState(size);
+  const center = 4;
+  state.types[center] = 1;
+  state.energy10[center] = 5;
+  state.age[center] = 7;
+
+  const runtime = createRuntimeContext(config);
+  const next = stepState(state, config, runtime, 1);
+  assert.equal(next.state.types[center], 1);
+  assert.equal(next.state.energy10[center], 4);
+  assert.equal(next.state.age[center], 8);
+});
+
+test("alive cell dies when fixed 0.1 age drain reaches zero", () => {
+  const config = normalizeSimConfig({
+    width: 3,
+    height: 3,
+    wrapWorld: false,
+    reproThreshold: 8,
+    constants: {
+      maxEnergy10: 50,
+      startEnergy10: 50,
+      spawnEnergy10: 50,
+      threatPenalty10: 0,
+      allyBonus10: 0,
+      preyBonus10: 0,
+      agingDrain10: 0
+    }
+  });
+  const size = config.width * config.height;
+  const state = emptyState(size);
+  const center = 4;
+  state.types[center] = 1;
+  state.energy10[center] = 1;
+  state.age[center] = 3;
+
+  const runtime = createRuntimeContext(config);
+  const next = stepState(state, config, runtime, 1);
+  assert.equal(next.state.types[center], 0);
+  assert.equal(next.state.energy10[center], 0);
+  assert.equal(next.state.age[center], 0);
+  assert.equal(next.metrics.deaths >= 1, true);
+});
+
+test("step result is identical even when config agingDrain10 differs", () => {
+  const normalized = normalizeSimConfig({
+    width: 5,
+    height: 5,
+    wrapWorld: false,
+    reproThreshold: 8,
+    constants: {
+      maxEnergy10: 50,
+      startEnergy10: 50,
+      spawnEnergy10: 50,
+      threatPenalty10: 0,
+      allyBonus10: 0,
+      preyBonus10: 0,
+      agingDrain10: 1
+    }
+  });
+  const configA = {
+    ...normalized,
+    constants: {
+      ...normalized.constants,
+      agingDrain10: 0
+    }
+  };
+  const configB = {
+    ...normalized,
+    constants: {
+      ...normalized.constants,
+      agingDrain10: 9
+    }
+  };
+
+  const size = normalized.width * normalized.height;
+  const state = emptyState(size);
+  const center = Math.floor(size / 2);
+  state.types[center] = 1;
+  state.energy10[center] = 5;
+
+  const runtimeA = createRuntimeContext(configA);
+  const runtimeB = createRuntimeContext(configB);
+  const nextA = stepState(state, configA, runtimeA, 1);
+  const nextB = stepState(state, configB, runtimeB, 1);
+
+  assert.equal(nextA.digest, nextB.digest);
+  assert.deepEqual(Array.from(nextA.state.types), Array.from(nextB.state.types));
+  assert.deepEqual(Array.from(nextA.state.energy10), Array.from(nextB.state.energy10));
+  assert.deepEqual(Array.from(nextA.state.age), Array.from(nextB.state.age));
+});
+
 test("same seed and config produce deterministic digest sequence", () => {
   const config = normalizeSimConfig({
     width: 32,
@@ -157,28 +274,115 @@ test("single-block init mode starts with up to 9 cells per type and all 3 types"
   let fire = 0;
   let water = 0;
   let grass = 0;
+  const bounds: Record<1 | 2 | 3, { minX: number; maxX: number; minY: number; maxY: number }> = {
+    1: { minX: config.width, maxX: -1, minY: config.height, maxY: -1 },
+    2: { minX: config.width, maxX: -1, minY: config.height, maxY: -1 },
+    3: { minX: config.width, maxX: -1, minY: config.height, maxY: -1 }
+  };
   for (let i = 0; i < state.types.length; i += 1) {
     if (state.types[i] !== 0) {
       aliveCount += 1;
       assert.equal(state.age[i], 0);
       assert.equal(state.energy10[i], config.constants.startEnergy10);
+      const x = i % config.width;
+      const y = Math.floor(i / config.width);
       if (state.types[i] === 1) fire += 1;
       if (state.types[i] === 2) water += 1;
       if (state.types[i] === 3) grass += 1;
+      const type = state.types[i] as 1 | 2 | 3;
+      const b = bounds[type];
+      b.minX = Math.min(b.minX, x);
+      b.maxX = Math.max(b.maxX, x);
+      b.minY = Math.min(b.minY, y);
+      b.maxY = Math.max(b.maxY, y);
     }
   }
   assert.equal(aliveCount, 27);
   assert.equal(fire, 9);
   assert.equal(water, 9);
   assert.equal(grass, 9);
+  assert.equal(bounds[1].maxX - bounds[1].minX + 1, 3);
+  assert.equal(bounds[1].maxY - bounds[1].minY + 1, 3);
+  assert.equal(bounds[2].maxX - bounds[2].minX + 1, 3);
+  assert.equal(bounds[2].maxY - bounds[2].minY + 1, 3);
+  assert.equal(bounds[3].maxX - bounds[3].minX + 1, 3);
+  assert.equal(bounds[3].maxY - bounds[3].minY + 1, 3);
+});
 
-  const centerX = Math.floor(config.width / 2);
-  const centerY = Math.floor(config.height / 2);
-  for (let y = centerY - 1; y <= centerY + 1; y += 1) {
-    for (let x = centerX - 1; x <= centerX + 1; x += 1) {
-      const idx = y * config.width + x;
-      // Center block remains occupied as part of the three-block seed.
-      assert.notEqual(state.types[idx], 0);
+test("single-block init mode footprint is deterministic per seed and changes across seeds", () => {
+  const base = {
+    width: 64,
+    height: 64,
+    initMode: "single-block" as const
+  };
+  const stateA = new ReferenceSimulator(
+    normalizeSimConfig({
+      ...base,
+      seed: 12345
+    })
+  ).getState();
+  const stateB = new ReferenceSimulator(
+    normalizeSimConfig({
+      ...base,
+      seed: 12345
+    })
+  ).getState();
+  const sameSeedFootprintA = aliveFootprintSignature(stateA);
+  const sameSeedFootprintB = aliveFootprintSignature(stateB);
+  assert.equal(sameSeedFootprintA, sameSeedFootprintB);
+
+  const varied = new Set<string>();
+  for (const seed of [1, 2, 3, 4, 5, 6, 7, 8]) {
+    const state = new ReferenceSimulator(
+      normalizeSimConfig({
+        ...base,
+        seed
+      })
+    ).getState();
+    varied.add(aliveFootprintSignature(state));
+  }
+  assert.equal(varied.size > 1, true);
+});
+
+test("single-block init mode keeps type blocks separated on large grids", () => {
+  const config = normalizeSimConfig({
+    width: 128,
+    height: 128,
+    seed: 20260221,
+    initMode: "single-block"
+  });
+  const state = new ReferenceSimulator(config).getState();
+  const bounds: Record<1 | 2 | 3, { minX: number; maxX: number; minY: number; maxY: number }> = {
+    1: { minX: config.width, maxX: -1, minY: config.height, maxY: -1 },
+    2: { minX: config.width, maxX: -1, minY: config.height, maxY: -1 },
+    3: { minX: config.width, maxX: -1, minY: config.height, maxY: -1 }
+  };
+
+  for (let i = 0; i < state.types.length; i += 1) {
+    const type = state.types[i] as 1 | 2 | 3 | 0;
+    if (type === 0) {
+      continue;
+    }
+    const x = i % config.width;
+    const y = Math.floor(i / config.width);
+    const b = bounds[type];
+    b.minX = Math.min(b.minX, x);
+    b.maxX = Math.max(b.maxX, x);
+    b.minY = Math.min(b.minY, y);
+    b.maxY = Math.max(b.maxY, y);
+  }
+
+  const centers = (Object.values(bounds) as Array<{ minX: number; maxX: number; minY: number; maxY: number }>).map((b) => ({
+    x: (b.minX + b.maxX) / 2,
+    y: (b.minY + b.maxY) / 2
+  }));
+  const minDistance = Math.max(8, Math.floor(Math.min(config.width, config.height) / 8));
+
+  for (let i = 0; i < centers.length; i += 1) {
+    for (let j = i + 1; j < centers.length; j += 1) {
+      const dx = (centers[i]?.x ?? 0) - (centers[j]?.x ?? 0);
+      const dy = (centers[i]?.y ?? 0) - (centers[j]?.y ?? 0);
+      assert.equal(Math.hypot(dx, dy) >= minDistance, true);
     }
   }
 });

@@ -53,8 +53,7 @@ function renderTemplate(template: string, options: BendRunOptions): string {
     __SPAWN_ENERGY__: config.constants.spawnEnergy10,
     __THREAT_PENALTY__: config.constants.threatPenalty10,
     __ALLY_BONUS__: config.constants.allyBonus10,
-    __PREY_BONUS__: config.constants.preyBonus10,
-    __AGING_DRAIN__: config.constants.agingDrain10
+    __PREY_BONUS__: config.constants.preyBonus10
   };
 
   let out = template;

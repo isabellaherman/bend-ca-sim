@@ -88,7 +88,7 @@ export const DEFAULT_CONSTANTS: SimConstants = {
   startEnergy10: 50,
   spawnEnergy10: 50,
   threatPenalty10: 10,
-  allyBonus10: 2,
+  allyBonus10: 0,
   preyBonus10: 0,
   agingDrain10: 1
 };
@@ -128,6 +128,7 @@ function normalizeInitMode(value: unknown, fallback: InitMode): InitMode {
 export function normalizeSimConfig(input?: PartialSimConfig): SimConfig {
   const source = input ?? {};
   const constantsSource = source.constants ?? {};
+  const fixedAgingDrain10 = DEFAULT_CONSTANTS.agingDrain10;
 
   const constants: SimConstants = {
     maxEnergy10: boundedInt(
@@ -166,12 +167,8 @@ export function normalizeSimConfig(input?: PartialSimConfig): SimConfig {
       10_000,
       DEFAULT_CONSTANTS.preyBonus10
     ),
-    agingDrain10: boundedInt(
-      constantsSource.agingDrain10 ?? DEFAULT_CONSTANTS.agingDrain10,
-      0,
-      10_000,
-      DEFAULT_CONSTANTS.agingDrain10
-    )
+    // Aging drain is a fixed simulation rule (0.1 energy per alive tick).
+    agingDrain10: fixedAgingDrain10
   };
 
   const maxEnergy10 = constants.maxEnergy10;

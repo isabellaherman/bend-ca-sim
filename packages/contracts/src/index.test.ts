@@ -27,3 +27,8 @@ test("init mode normalization accepts all modes and rejects unknown values", () 
     DEFAULT_SIM_CONFIG.initMode
   );
 });
+
+test("aging drain is normalized to fixed 0.1 regardless of input", () => {
+  assert.equal(normalizeSimConfig({ constants: { agingDrain10: 0 } }).constants.agingDrain10, 1);
+  assert.equal(normalizeSimConfig({ constants: { agingDrain10: 50 } }).constants.agingDrain10, 1);
+});

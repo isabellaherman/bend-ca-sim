@@ -5,6 +5,56 @@ Deterministic cellular automata sandbox with:
 - Bend-oriented simulation architecture
 - JS reference engine for parity and tooling
 - Local bridge for real-time canvas rendering
+- Fixed age drain rule: every alive cell loses 0.1 energy per tick
+
+## Simulation Rules (Human-Friendly)
+
+### Energy scale
+
+Internal values use tenths (`energy10`):
+
+| Internal (`energy10`) | Human value |
+| --- | --- |
+| 50 | 5.0 |
+| 49 | 4.9 |
+| 40 | 4.0 |
+| 1 | 0.1 |
+| 0 | 0.0 (cell dies) |
+
+### Neighborhood and battle rules
+
+| Theme | Human rule | Current default |
+| --- | --- | --- |
+| Neighborhood | Each cell checks the 8 surrounding neighbors. | 8 neighbors |
+| Map edges | World wraps around at borders. | `wrapWorld = true` |
+| Type advantage | Water beats Fire, Fire beats Grass, Grass beats Water. | Fixed |
+| Birth trigger | Empty cell can spawn if a type reaches threshold in neighbors. | `reproThreshold = 3` |
+| Spawn energy | Newborn starts with spawn energy. | `spawnEnergy10 = 50` (5.0) |
+| Newborn age | Newborn starts at age zero. | `age = 0` |
+| Aging drain | Alive cell loses 0.1 energy every tick. | Fixed at `1` in `energy10` |
+| Threat penalty | Each threatening neighbor removes energy. | `threatPenalty10 = 10` (1.0) |
+| Ally bonus | Same-type neighbors can add energy. | `allyBonus10 = 0` |
+| Prey bonus | Neighbors you beat can add energy. | `preyBonus10 = 0` |
+| Max energy | Energy cannot exceed cap. | `maxEnergy10 = 50` (5.0) |
+| Death | Cell dies when energy reaches zero. | type -> empty, energy -> 0, age -> 0 |
+| Surviving tick | Surviving cell gets older. | `age += 1` |
+
+### Per-tick formula (alive cell)
+
+```txt
+delta10 =
+  -(threats * threatPenalty10)
+  + (allies * allyBonus10)
+  + (prey * preyBonus10)
+  - 1
+
+nextEnergy10 = clamp(currentEnergy10 + delta10, 0, maxEnergy10)
+```
+
+Notes:
+
+- The fixed `-1` is the mandatory aging drain (`-0.1` human scale).
+- Newborn cells do not take aging drain on the birth tick.
 
 ## Workspace layout
 
