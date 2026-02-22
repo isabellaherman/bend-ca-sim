@@ -1,6 +1,7 @@
 export type TypeCode = 0 | 1 | 2 | 3;
 export type InitMode = "random" | "clustered" | "triad" | "single-block";
 export type EngineBackend = "js" | "bend-rs" | "bend-c";
+export type RunPhase = "idle" | "running" | "paused";
 
 export interface SimConstants {
   maxEnergy10: number;
@@ -73,8 +74,19 @@ export interface BridgeErrorMessage {
   message: string;
 }
 
+export interface BridgeStateMessage {
+  type: "state";
+  phase: RunPhase;
+  hasRun: boolean;
+  runId: string | null;
+  tick: number;
+  backend: EngineBackend | null;
+  seed: number | null;
+}
+
 export type BridgeServerMessage =
   | { type: "frame"; frame: FrameMessage }
+  | BridgeStateMessage
   | BridgeInfoMessage
   | BridgeErrorMessage;
 

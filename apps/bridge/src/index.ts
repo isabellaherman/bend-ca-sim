@@ -1,253 +1,546 @@
-import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
+import { createServer, type IncomingMessage, type Server as HttpServer } from "node:http";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
-  DEFAULT_SIM_CONFIG,
   normalizeSimConfig,
-  randomSeed,
   type BridgeServerMessage,
+  type BridgeStateMessage,
   type ControlMessage,
   type EngineBackend,
-  type PartialSimConfig,
+  type FrameMessage,
+  type RunPhase,
   type SimConfig
 } from "@ca-sim/contracts";
 import { ReferenceSimulator, buildFrame } from "@ca-sim/reference";
 import { WebSocket, WebSocketServer } from "ws";
+import { decideControl } from "./control_state.js";
 import { startAutoplayLoop } from "./loop.js";
 
-const port = Number(process.env.BRIDGE_PORT ?? 8787);
-const host = process.env.BRIDGE_HOST ?? "0.0.0.0";
+const DEFAULT_PORT = 8787;
+const DEFAULT_HOST = "0.0.0.0";
+const DEFAULT_SESSION_TTL_MS = 15 * 60 * 1000;
 
-type ClientState = {
-  runId: string;
-  backend: EngineBackend;
-  config: SimConfig;
-  simulator: ReferenceSimulator;
-  paused: boolean;
+type SessionState = {
+  clientId: string;
+  runId: string | null;
+  backend: EngineBackend | null;
+  config: SimConfig | null;
+  simulator: ReferenceSimulator | null;
+  phase: RunPhase;
   timer: NodeJS.Timeout | null;
+  socket: WebSocket | null;
+  lastFrame: FrameMessage | null;
+  disconnectTimer: NodeJS.Timeout | null;
+  lastActiveAt: number;
 };
 
-function send(ws: WebSocket, message: BridgeServerMessage): void {
-  if (ws.readyState !== WebSocket.OPEN) {
+export type BridgeServerOptions = {
+  host?: string;
+  port?: number;
+  sessionTtlMs?: number;
+};
+
+export type BridgeServerHandle = {
+  host: string;
+  port: number;
+  wsUrl: string;
+  server: HttpServer;
+  wss: WebSocketServer;
+  close: () => Promise<void>;
+};
+
+function coercePort(value: unknown, fallback: number): number {
+  const num = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(num)) {
+    return fallback;
+  }
+  return Math.max(0, Math.floor(num));
+}
+
+function coerceSessionTtl(value: unknown, fallback: number): number {
+  const num = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(num)) {
+    return fallback;
+  }
+  return Math.max(1000, Math.floor(num));
+}
+
+function send(ws: WebSocket | null, message: BridgeServerMessage): void {
+  if (ws === null || ws.readyState !== WebSocket.OPEN) {
     return;
   }
   ws.send(JSON.stringify(message));
 }
 
-function sendInfo(ws: WebSocket, message: string): void {
+function sendInfo(ws: WebSocket | null, message: string): void {
   send(ws, { type: "info", message });
 }
 
-function sendError(ws: WebSocket, message: string): void {
+function sendError(ws: WebSocket | null, message: string): void {
   send(ws, { type: "error", message });
 }
 
-function emitInitialFrame(ws: WebSocket, state: ClientState): void {
-  const snapshot = state.simulator.getState();
+function createEmptySession(clientId: string): SessionState {
+  return {
+    clientId,
+    runId: null,
+    backend: null,
+    config: null,
+    simulator: null,
+    phase: "idle",
+    timer: null,
+    socket: null,
+    lastFrame: null,
+    disconnectTimer: null,
+    lastActiveAt: Date.now()
+  };
+}
+
+function hasRun(
+  session: SessionState
+): session is SessionState & {
+  runId: string;
+  backend: EngineBackend;
+  config: SimConfig;
+  simulator: ReferenceSimulator;
+} {
+  return session.runId !== null && session.backend !== null && session.config !== null && session.simulator !== null;
+}
+
+function asStateMessage(session: SessionState): BridgeStateMessage {
+  const tick = hasRun(session) ? session.simulator.getTick() : 0;
+  return {
+    type: "state",
+    phase: session.phase,
+    hasRun: hasRun(session),
+    runId: session.runId,
+    tick,
+    backend: session.backend,
+    seed: session.config?.seed ?? null
+  };
+}
+
+function emitState(session: SessionState): void {
+  send(session.socket, asStateMessage(session));
+}
+
+function emitFrame(session: SessionState, frame: FrameMessage): void {
+  session.lastFrame = frame;
+  send(session.socket, { type: "frame", frame });
+}
+
+function emitInitialFrame(session: SessionState): void {
+  if (!hasRun(session)) {
+    return;
+  }
+  const snapshot = session.simulator.getState();
   const frame = buildFrame(
-    state.runId,
-    state.backend,
-    state.simulator.getTick(),
-    state.simulator.getDigest(),
-    state.simulator.getMetrics(),
+    session.runId,
+    session.backend,
+    session.simulator.getTick(),
+    session.simulator.getDigest(),
+    session.simulator.getMetrics(),
     snapshot,
     true
   );
-  send(ws, { type: "frame", frame });
+  emitFrame(session, frame);
 }
 
-function emitSteps(ws: WebSocket, state: ClientState, ticks: number): void {
-  const maxTicks = Math.max(1, Math.floor(ticks));
-  for (let i = 0; i < maxTicks; i += 1) {
-    const result = state.simulator.step();
+function emitSteps(session: SessionState, ticks: number): void {
+  if (!hasRun(session)) {
+    return;
+  }
+  const safeTicks = Math.max(1, Math.floor(ticks));
+  for (let i = 0; i < safeTicks; i += 1) {
+    const result = session.simulator.step();
     const frame = buildFrame(
-      state.runId,
-      state.backend,
-      state.simulator.getTick(),
+      session.runId,
+      session.backend,
+      session.simulator.getTick(),
       result.digest,
       result.metrics,
       result.state,
       true
     );
-    send(ws, { type: "frame", frame });
+    emitFrame(session, frame);
   }
 }
 
-function clearTimer(state: ClientState): void {
-  if (state.timer === null) {
+function clearTimer(session: SessionState): void {
+  if (session.timer === null) {
     return;
   }
-  clearInterval(state.timer);
-  state.timer = null;
+  clearInterval(session.timer);
+  session.timer = null;
 }
 
-function startLoop(ws: WebSocket, state: ClientState): void {
-  clearTimer(state);
-  state.timer = startAutoplayLoop({
-    tickRateUi: state.config.tickRateUi,
-    isPaused: () => state.paused,
-    onTick: () => emitSteps(ws, state, 1)
+function startLoop(session: SessionState): void {
+  clearTimer(session);
+  if (!hasRun(session) || session.phase !== "running") {
+    return;
+  }
+  if (session.socket === null || session.socket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+  session.timer = startAutoplayLoop({
+    tickRateUi: session.config.tickRateUi,
+    isPaused: () =>
+      session.phase !== "running" ||
+      session.socket === null ||
+      session.socket.readyState !== WebSocket.OPEN,
+    onTick: () => {
+      if (session.socket === null || session.socket.readyState !== WebSocket.OPEN) {
+        clearTimer(session);
+        return;
+      }
+      emitSteps(session, 1);
+    }
   });
 }
 
-function makeClientState(config: SimConfig, backend: EngineBackend): ClientState {
-  return {
-    runId: randomUUID(),
-    backend,
-    config,
-    simulator: new ReferenceSimulator(config),
-    paused: false,
-    timer: null
-  };
-}
-
-function applyStart(
-  ws: WebSocket,
-  current: ClientState | null,
-  config: SimConfig,
-  requestedBackend: EngineBackend | undefined
-): ClientState {
-  if (current !== null) {
-    clearTimer(current);
+function ensureSession(sessions: Map<string, SessionState>, clientId: string): SessionState {
+  const existing = sessions.get(clientId);
+  if (existing !== undefined) {
+    return existing;
   }
-  const backend: EngineBackend = requestedBackend ?? "js";
-  if (backend !== "js") {
-    sendInfo(ws, `Backend "${backend}" requested. Live bridge currently runs JS reference engine.`);
-  }
-  const state = makeClientState(config, "js");
-  emitInitialFrame(ws, state);
-  startLoop(ws, state);
-  return state;
-}
-
-function applyReset(
-  ws: WebSocket,
-  current: ClientState,
-  seed: number | undefined,
-  partialConfig: PartialSimConfig | undefined
-): ClientState {
-  const merged = normalizeSimConfig({
-    ...current.config,
-    ...(partialConfig ?? {}),
-    seed: seed ?? partialConfig?.seed ?? current.config.seed
-  });
-  const next = makeClientState(merged, current.backend);
-  next.paused = current.paused;
-  emitInitialFrame(ws, next);
-  startLoop(ws, next);
+  const next = createEmptySession(clientId);
+  sessions.set(clientId, next);
   return next;
+}
+
+function dropSession(sessions: Map<string, SessionState>, session: SessionState): void {
+  clearTimer(session);
+  if (session.disconnectTimer !== null) {
+    clearTimeout(session.disconnectTimer);
+    session.disconnectTimer = null;
+  }
+  sessions.delete(session.clientId);
+}
+
+function scheduleSessionDrop(
+  sessions: Map<string, SessionState>,
+  session: SessionState,
+  sessionTtlMs: number
+): void {
+  if (session.disconnectTimer !== null) {
+    clearTimeout(session.disconnectTimer);
+  }
+  session.lastActiveAt = Date.now();
+  session.disconnectTimer = setTimeout(() => {
+    if (session.socket !== null) {
+      return;
+    }
+    dropSession(sessions, session);
+  }, sessionTtlMs);
+}
+
+function parseClientId(request: IncomingMessage): string {
+  const requestUrl = request.url ?? "/";
+  const host = request.headers.host ?? "localhost";
+  try {
+    const parsed = new URL(requestUrl, `http://${host}`);
+    const raw = parsed.searchParams.get("clientId")?.trim() ?? "";
+    if (raw.length > 0) {
+      return raw.slice(0, 128);
+    }
+  } catch {
+    // no-op
+  }
+  return randomUUID();
 }
 
 function parseControlMessage(raw: string): ControlMessage | null {
   try {
-    const data = JSON.parse(raw) as ControlMessage;
-    if (!data || typeof data !== "object" || !("type" in data)) {
+    const data = JSON.parse(raw) as { type?: unknown; config?: unknown };
+    if (typeof data !== "object" || data === null || typeof data.type !== "string") {
       return null;
     }
-    return data;
+    if (data.type === "start") {
+      if (typeof data.config !== "object" || data.config === null) {
+        return null;
+      }
+      return data as ControlMessage;
+    }
+    if (
+      data.type === "pause" ||
+      data.type === "resume" ||
+      data.type === "step" ||
+      data.type === "reset" ||
+      data.type === "stop"
+    ) {
+      return data as ControlMessage;
+    }
+    return null;
   } catch {
     return null;
   }
 }
 
-const server = createServer((req, res) => {
-  if (req.url === "/health") {
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok: true }));
+function startNewRun(
+  session: SessionState,
+  config: SimConfig,
+  requestedBackend: EngineBackend | undefined
+): void {
+  if (requestedBackend !== undefined && requestedBackend !== "js") {
+    sendInfo(session.socket, `Backend "${requestedBackend}" requested. Live bridge currently runs JS reference engine.`);
+  }
+  session.runId = randomUUID();
+  session.backend = "js";
+  session.config = config;
+  session.simulator = new ReferenceSimulator(config);
+  session.phase = "running";
+  emitInitialFrame(session);
+  startLoop(session);
+}
+
+function resetRun(session: SessionState): void {
+  if (!hasRun(session)) {
     return;
   }
-  res.writeHead(200, { "content-type": "application/json" });
-  res.end(
-    JSON.stringify({
-      service: "ca-sim-bridge",
-      ws: `ws://${host}:${port}`,
-      health: "/health"
-    })
+  session.simulator = new ReferenceSimulator(session.config);
+  emitInitialFrame(session);
+  if (session.phase === "running") {
+    startLoop(session);
+    return;
+  }
+  clearTimer(session);
+}
+
+function stopRun(session: SessionState): void {
+  clearTimer(session);
+  session.runId = null;
+  session.backend = null;
+  session.config = null;
+  session.simulator = null;
+  session.phase = "idle";
+  session.lastFrame = null;
+}
+
+function attachConnection(session: SessionState, ws: WebSocket): void {
+  if (session.disconnectTimer !== null) {
+    clearTimeout(session.disconnectTimer);
+    session.disconnectTimer = null;
+  }
+  if (session.socket !== null && session.socket !== ws && session.socket.readyState === WebSocket.OPEN) {
+    session.socket.close(1000, "Replaced by newer connection.");
+  }
+  session.socket = ws;
+  session.lastActiveAt = Date.now();
+  sendInfo(ws, `Connected as client "${session.clientId}".`);
+  emitState(session);
+  if (session.lastFrame !== null) {
+    send(ws, { type: "frame", frame: session.lastFrame });
+  }
+  if (session.phase === "running") {
+    startLoop(session);
+  }
+}
+
+function disconnectConnection(session: SessionState, ws: WebSocket): void {
+  if (session.socket !== ws) {
+    return;
+  }
+  session.socket = null;
+  clearTimer(session);
+}
+
+function handleControlMessage(session: SessionState, message: ControlMessage): void {
+  const decision = decideControl(
+    {
+      hasRun: hasRun(session),
+      phase: session.phase
+    },
+    message
   );
-});
 
-const wss = new WebSocketServer({ server });
+  switch (decision.kind) {
+    case "start_new": {
+      if (message.type !== "start") {
+        sendError(session.socket, "Invalid start payload.");
+        break;
+      }
+      const normalized = normalizeSimConfig(message.config);
+      startNewRun(session, normalized, message.backend);
+      sendInfo(session.socket, `Run started: ${session.runId} (seed=${normalized.seed}, backend=${session.backend})`);
+      break;
+    }
+    case "resume": {
+      session.phase = "running";
+      startLoop(session);
+      sendInfo(session.socket, "Resumed.");
+      break;
+    }
+    case "pause": {
+      session.phase = "paused";
+      clearTimer(session);
+      sendInfo(session.socket, "Paused.");
+      break;
+    }
+    case "reset": {
+      resetRun(session);
+      if (session.config !== null) {
+        sendInfo(session.socket, `Run reset (seed=${session.config.seed}).`);
+      }
+      break;
+    }
+    case "step": {
+      emitSteps(session, decision.ticks);
+      sendInfo(session.socket, `Stepped ${decision.ticks} tick(s).`);
+      break;
+    }
+    case "stop": {
+      stopRun(session);
+      sendInfo(session.socket, "Stopped.");
+      break;
+    }
+    case "noop": {
+      sendInfo(session.socket, decision.reason);
+      break;
+    }
+    case "error": {
+      sendError(session.socket, decision.message);
+      break;
+    }
+    default: {
+      const exhaustive: never = decision;
+      return exhaustive;
+    }
+  }
 
-wss.on("connection", (ws) => {
-  let state: ClientState | null = null;
-  sendInfo(ws, "Connected. Send ControlMessage JSON payloads.");
+  emitState(session);
+}
 
-  ws.on("message", (payload) => {
-    const message = parseControlMessage(payload.toString());
-    if (message === null) {
-      sendError(ws, "Invalid control message JSON.");
+export async function createBridgeServer(options: BridgeServerOptions = {}): Promise<BridgeServerHandle> {
+  const host = options.host ?? process.env.BRIDGE_HOST ?? DEFAULT_HOST;
+  const port = coercePort(options.port ?? process.env.BRIDGE_PORT, DEFAULT_PORT);
+  const sessionTtlMs = coerceSessionTtl(
+    options.sessionTtlMs ?? process.env.BRIDGE_SESSION_TTL_MS,
+    DEFAULT_SESSION_TTL_MS
+  );
+  const sessions = new Map<string, SessionState>();
+
+  const server = createServer((req, res) => {
+    if (req.url === "/health") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
       return;
     }
-
-    switch (message.type) {
-      case "start": {
-        const normalized = normalizeSimConfig(message.config);
-        state = applyStart(ws, state, normalized, message.backend);
-        sendInfo(ws, `Run started: ${state.runId} (seed=${normalized.seed}, backend=${state.backend})`);
-        return;
-      }
-      case "pause": {
-        if (state === null) {
-          sendError(ws, "No active run. Send start first.");
-          return;
-        }
-        state.paused = true;
-        sendInfo(ws, "Paused.");
-        return;
-      }
-      case "resume": {
-        if (state === null) {
-          sendError(ws, "No active run. Send start first.");
-          return;
-        }
-        state.paused = false;
-        sendInfo(ws, "Resumed.");
-        return;
-      }
-      case "step": {
-        if (state === null) {
-          sendError(ws, "No active run. Send start first.");
-          return;
-        }
-        emitSteps(ws, state, message.ticks ?? 1);
-        sendInfo(ws, `Stepped ${Math.max(1, Math.floor(message.ticks ?? 1))} tick(s).`);
-        return;
-      }
-      case "reset": {
-        if (state === null) {
-          const seed = message.seed ?? randomSeed();
-          const config = normalizeSimConfig({
-            ...DEFAULT_SIM_CONFIG,
-            ...(message.config ?? {}),
-            seed
-          });
-          state = applyStart(ws, state, config, "js");
-          sendInfo(ws, `No active run found. Started new run with seed ${seed}.`);
-          return;
-        }
-        state = applyReset(ws, state, message.seed, message.config);
-        sendInfo(ws, `Run reset: ${state.runId} (seed=${state.config.seed})`);
-        return;
-      }
-      case "stop": {
-        if (state !== null) {
-          clearTimer(state);
-          state = null;
-        }
-        sendInfo(ws, "Stopped.");
-        return;
-      }
-      default:
-        sendError(ws, "Unsupported control message.");
-    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(
+      JSON.stringify({
+        service: "ca-sim-bridge",
+        controls: ["start", "pause", "resume", "reset", "step", "stop"],
+        sessionTtlMs,
+        health: "/health"
+      })
+    );
   });
 
-  ws.on("close", () => {
-    if (state !== null) {
-      clearTimer(state);
-    }
-  });
-});
+  const wss = new WebSocketServer({ server });
 
-server.listen(port, host, () => {
-  process.stdout.write(`[bridge] listening on ws://${host}:${port}\n`);
-});
+  wss.on("connection", (ws, request) => {
+    const clientId = parseClientId(request);
+    const session = ensureSession(sessions, clientId);
+    attachConnection(session, ws);
+
+    ws.on("message", (payload) => {
+      session.lastActiveAt = Date.now();
+      const raw = typeof payload === "string" ? payload : payload.toString();
+      const message = parseControlMessage(raw);
+      if (message === null) {
+        sendError(session.socket, "Invalid control message JSON.");
+        emitState(session);
+        return;
+      }
+      handleControlMessage(session, message);
+    });
+
+    ws.on("close", () => {
+      disconnectConnection(session, ws);
+      scheduleSessionDrop(sessions, session, sessionTtlMs);
+    });
+  });
+
+  await new Promise<void>((resolveListen, rejectListen) => {
+    const onError = (err: Error): void => {
+      server.off("listening", onListening);
+      wss.off("error", onError);
+      rejectListen(err);
+    };
+    const onListening = (): void => {
+      server.off("error", onError);
+      wss.off("error", onError);
+      resolveListen();
+    };
+    server.once("error", onError);
+    wss.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(port, host);
+  });
+
+  wss.on("error", (error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`[bridge] websocket error: ${message}\n`);
+  });
+
+  const address = server.address();
+  const boundPort =
+    typeof address === "object" && address !== null && "port" in address ? Number(address.port) : port;
+  const wsUrl = `ws://${host}:${boundPort}`;
+
+  const close = async (): Promise<void> => {
+    for (const session of sessions.values()) {
+      clearTimer(session);
+      if (session.disconnectTimer !== null) {
+        clearTimeout(session.disconnectTimer);
+        session.disconnectTimer = null;
+      }
+      if (session.socket !== null && session.socket.readyState === WebSocket.OPEN) {
+        session.socket.close(1001, "Server shutting down.");
+      }
+    }
+    sessions.clear();
+
+    await new Promise<void>((resolveWss) => {
+      wss.close(() => resolveWss());
+    });
+    await new Promise<void>((resolveServer, rejectServer) => {
+      server.close((err) => {
+        if (err !== undefined) {
+          rejectServer(err);
+          return;
+        }
+        resolveServer();
+      });
+    });
+  };
+
+  return {
+    host,
+    port: boundPort,
+    wsUrl,
+    server,
+    wss,
+    close
+  };
+}
+
+function isMainModule(metaUrl: string): boolean {
+  if (process.argv[1] === undefined) {
+    return false;
+  }
+  return resolve(fileURLToPath(metaUrl)) === resolve(process.argv[1]);
+}
+
+if (isMainModule(import.meta.url)) {
+  createBridgeServer()
+    .then((bridge) => {
+      process.stdout.write(`[bridge] listening on ${bridge.wsUrl}\n`);
+    })
+    .catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`[bridge] failed to start: ${message}\n`);
+      process.exitCode = 1;
+    });
+}

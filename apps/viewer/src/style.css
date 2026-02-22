@@ -132,6 +132,12 @@ body {
   filter: brightness(1.08);
 }
 
+.control-bar button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+  filter: saturate(0.6);
+}
+
 .playback-first {
   margin-left: auto;
 }

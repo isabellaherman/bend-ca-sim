@@ -2,8 +2,11 @@ import {
   normalizeSimConfig,
   randomSeed,
   type BridgeServerMessage,
+  type BridgeStateMessage,
   type ControlMessage,
+  type EngineBackend,
   type FrameMessage,
+  type RunPhase,
   type SimConfig,
   type TypeCode
 } from "@ca-sim/contracts";
@@ -12,6 +15,7 @@ const WS_URL = (import.meta.env.VITE_BRIDGE_WS as string | undefined) ?? "ws://l
 const GRID_SIZE = 64;
 const MIN_CELL_SIZE_PX = 13;
 const MAX_CELL_SIZE_PX = 18;
+const CLIENT_ID_STORAGE_KEY = "ca-sim-client-id";
 
 type DecodedState = {
   types: Uint8Array;
@@ -26,10 +30,19 @@ type UiRefs = {
   start: HTMLButtonElement;
   pause: HTMLButtonElement;
   resume: HTMLButtonElement;
-  step: HTMLButtonElement;
   reset: HTMLButtonElement;
   seedRandom: HTMLButtonElement;
   seedInput: HTMLInputElement;
+};
+
+type ViewerRunState = {
+  connected: boolean;
+  phase: RunPhase;
+  hasRun: boolean;
+  runId: string | null;
+  tick: number;
+  backend: EngineBackend | null;
+  seed: number | null;
 };
 
 function template(): string {
@@ -49,7 +62,6 @@ function template(): string {
         <button id="start" type="button" class="playback-first">Start</button>
         <button id="pause" type="button">Pause</button>
         <button id="resume" type="button">Resume</button>
-        <button id="step" type="button">Step</button>
         <button id="reset" type="button">Reset</button>
       </footer>
     </div>
@@ -129,7 +141,6 @@ function getUiRefs(): UiRefs {
     start: parseRequired("#start"),
     pause: parseRequired("#pause"),
     resume: parseRequired("#resume"),
-    step: parseRequired("#step"),
     reset: parseRequired("#reset"),
     seedRandom: parseRequired("#seed-random"),
     seedInput: parseRequired("#seed")
@@ -165,6 +176,32 @@ function makeConfig(ui: UiRefs, previous?: SimConfig): SimConfig {
   });
 }
 
+function getOrCreateClientId(): string {
+  const fallback = `viewer-${Math.random().toString(16).slice(2)}-${Date.now()}`;
+  const generated = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : fallback;
+  try {
+    const existing = window.localStorage.getItem(CLIENT_ID_STORAGE_KEY)?.trim() ?? "";
+    if (existing.length > 0) {
+      return existing;
+    }
+    window.localStorage.setItem(CLIENT_ID_STORAGE_KEY, generated);
+    return generated;
+  } catch {
+    return generated;
+  }
+}
+
+function buildBridgeUrl(baseUrl: string, clientId: string): string {
+  try {
+    const url = new URL(baseUrl, window.location.href);
+    url.searchParams.set("clientId", clientId);
+    return url.toString();
+  } catch {
+    const separator = baseUrl.includes("?") ? "&" : "?";
+    return `${baseUrl}${separator}clientId=${encodeURIComponent(clientId)}`;
+  }
+}
+
 export function bootApp(): void {
   const root = document.getElementById("app");
   if (root === null) {
@@ -175,16 +212,67 @@ export function bootApp(): void {
   const ui = getUiRefs();
   ui.seedInput.value = String(randomSeed());
 
+  const clientId = getOrCreateClientId();
+  const bridgeUrl = buildBridgeUrl(WS_URL, clientId);
+
   let ws: WebSocket | null = null;
   let latestConfig = makeConfig(ui);
   let decodedState: DecodedState | null = null;
   let cellSizePx = MIN_CELL_SIZE_PX;
+  let lastFrame: FrameMessage | null = null;
+  let runState: ViewerRunState = {
+    connected: false,
+    phase: "idle",
+    hasRun: false,
+    runId: null,
+    tick: 0,
+    backend: null,
+    seed: null
+  };
 
   const rawCtx = ui.canvas.getContext("2d");
   if (rawCtx === null) {
     throw new Error("Canvas context is unavailable.");
   }
   const ctx = rawCtx;
+
+  function applyControlState(): void {
+    const connected = runState.connected;
+    ui.start.disabled = !connected || runState.phase === "running";
+    ui.pause.disabled = !connected || runState.phase !== "running";
+    ui.resume.disabled = !connected || runState.phase !== "paused";
+    ui.reset.disabled = !connected || !runState.hasRun;
+  }
+
+  function renderRunInfo(): void {
+    if (!runState.connected) {
+      ui.runInfo.textContent = "Bridge disconnected. Reconnecting...";
+      return;
+    }
+    if (!runState.hasRun || runState.runId === null) {
+      ui.runInfo.textContent = "No active run";
+      return;
+    }
+
+    const phase = escapeHtml(runState.phase);
+    const backend = escapeHtml(runState.backend ?? "js");
+    const runId = escapeHtml(runState.runId);
+    const tick = lastFrame?.tick ?? runState.tick;
+
+    if (lastFrame !== null) {
+      const metrics = lastFrame.metrics;
+      const alive = metrics.popFire + metrics.popWater + metrics.popGrass;
+      ui.runInfo.innerHTML =
+        `run ${runId} | tick ${tick} | phase ${phase} | backend ${backend} | ` +
+        `cells ${alive} (` +
+        `<span class="run-info-fire">F ${metrics.popFire}</span> / ` +
+        `<span class="run-info-water">W ${metrics.popWater}</span> / ` +
+        `<span class="run-info-grass">G ${metrics.popGrass}</span>)`;
+      return;
+    }
+
+    ui.runInfo.innerHTML = `run ${runId} | tick ${tick} | phase ${phase} | backend ${backend}`;
+  }
 
   function sendControl(message: ControlMessage): void {
     if (ws === null || ws.readyState !== WebSocket.OPEN) {
@@ -255,15 +343,38 @@ export function bootApp(): void {
     if (nextState !== null) {
       decodedState = nextState;
     }
-    const m = frame.metrics;
-    const alive = m.popFire + m.popWater + m.popGrass;
-    ui.runInfo.innerHTML =
-      `run ${escapeHtml(frame.runId)} | tick ${frame.tick} | backend ${frame.backend} | ` +
-      `cells ${alive} (` +
-      `<span class="run-info-fire">F ${m.popFire}</span> / ` +
-      `<span class="run-info-water">W ${m.popWater}</span> / ` +
-      `<span class="run-info-grass">G ${m.popGrass}</span>)`;
+    runState = {
+      ...runState,
+      hasRun: true,
+      runId: frame.runId,
+      tick: frame.tick,
+      backend: frame.backend
+    };
+    lastFrame = frame;
+    renderRunInfo();
     renderFrame();
+  }
+
+  function handleState(state: BridgeStateMessage): void {
+    runState = {
+      connected: runState.connected,
+      phase: state.phase,
+      hasRun: state.hasRun,
+      runId: state.runId,
+      tick: state.tick,
+      backend: state.backend,
+      seed: state.seed
+    };
+    if (state.seed !== null) {
+      ui.seedInput.value = String(state.seed);
+    }
+    if (!state.hasRun) {
+      lastFrame = null;
+      decodedState = null;
+      renderFrame();
+    }
+    applyControlState();
+    renderRunInfo();
   }
 
   function handleServerMessage(data: BridgeServerMessage): void {
@@ -271,14 +382,39 @@ export function bootApp(): void {
       handleFrame(data.frame);
       return;
     }
+    if (data.type === "state") {
+      handleState(data);
+      return;
+    }
+    if (data.type === "error") {
+      console.error(`[bridge] ${data.message}`);
+      renderRunInfo();
+      return;
+    }
+    if (data.type === "info") {
+      console.info(`[bridge] ${data.message}`);
+    }
   }
 
   function connectBridge(): void {
-    ws = new WebSocket(WS_URL);
+    ws = new WebSocket(bridgeUrl);
 
-    ws.onopen = () => undefined;
+    ws.onopen = () => {
+      runState = {
+        ...runState,
+        connected: true
+      };
+      applyControlState();
+      renderRunInfo();
+    };
 
     ws.onclose = () => {
+      runState = {
+        ...runState,
+        connected: false
+      };
+      applyControlState();
+      renderRunInfo();
       setTimeout(connectBridge, 1200);
     };
 
@@ -300,9 +436,11 @@ export function bootApp(): void {
     });
 
     ui.start.addEventListener("click", () => {
-      latestConfig = makeConfig(ui, latestConfig);
-      ui.seedInput.value = String(latestConfig.seed);
-      sendControl({ type: "start", backend: "js", config: latestConfig });
+      if (!runState.hasRun) {
+        latestConfig = makeConfig(ui, latestConfig);
+        ui.seedInput.value = String(latestConfig.seed);
+      }
+      sendControl({ type: "start", config: latestConfig });
     });
 
     ui.pause.addEventListener("click", () => {
@@ -313,18 +451,8 @@ export function bootApp(): void {
       sendControl({ type: "resume" });
     });
 
-    ui.step.addEventListener("click", () => {
-      sendControl({ type: "step", ticks: latestConfig.chunkTicks });
-    });
-
     ui.reset.addEventListener("click", () => {
-      latestConfig = makeConfig(ui, latestConfig);
-      ui.seedInput.value = String(latestConfig.seed);
-      sendControl({
-        type: "reset",
-        seed: latestConfig.seed,
-        config: latestConfig
-      });
+      sendControl({ type: "reset" });
     });
   }
 
@@ -332,6 +460,8 @@ export function bootApp(): void {
   window.addEventListener("resize", () => {
     renderFrame();
   });
+  applyControlState();
+  renderRunInfo();
   connectBridge();
   renderFrame();
 }
