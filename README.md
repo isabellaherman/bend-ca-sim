@@ -1,13 +1,32 @@
-# CA-Sim v0
+# CA Sim Bend CLI
 
-Deterministic cellular automata sandbox with:
+### TL;DR
 
-- Bend-oriented simulation architecture
-- JS reference engine for parity and tooling
-- Local bridge for real-time canvas rendering
-- Fixed age drain rule: every alive cell loses 0.1 energy per tick
+This is not Bend2 and not Bend running in the browser.
 
-## Simulation Rules (Human-Friendly)
+It uses the Bend CLI locally (Bend1 prototype) with a TypeScript + Canvas web UI.
+
+⚠️ Live loop runs on the JS reference engine
+
+Bend is integrated for parity/benchmarking validation when the Bend CLI is installed.
+
+What I would like to acchieve: move the live loop to Bend.
+
+## What this is NOT
+
+- It is not Bend2.
+- It is not Bend running in the browser.
+- It is not 100% Bend in the live runtime loop. ⚠️
+
+## What this IS
+
+- A simulation project with a Bend kernel.
+- A web interface built with TypeScript + Canvas.
+- Today, the Live simulation loop runs on the JS reference engine ⚠️
+- Bend is integrated in parity/benchmarking validation (when installed).
+- The goal is to plug Bend in as a live backend too.
+
+## Simulation Rules
 
 ### Energy scale
 

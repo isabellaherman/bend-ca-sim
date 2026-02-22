@@ -21,6 +21,7 @@ type DecodedState = {
 
 type UiRefs = {
   viewport: HTMLElement;
+  runInfo: HTMLElement;
   canvas: HTMLCanvasElement;
   start: HTMLButtonElement;
   pause: HTMLButtonElement;
@@ -35,6 +36,7 @@ function template(): string {
   return `
     <div class="shell">
       <main class="stage">
+        <div class="run-info" id="run-info">No active run</div>
         <div class="sim-viewport" id="sim-viewport">
           <canvas id="sim-canvas" width="896" height="896"></canvas>
         </div>
@@ -110,9 +112,19 @@ function parseRequired<T extends HTMLElement>(selector: string): T {
   return el as T;
 }
 
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll("\"", "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
 function getUiRefs(): UiRefs {
   return {
     viewport: parseRequired("#sim-viewport"),
+    runInfo: parseRequired("#run-info"),
     canvas: parseRequired("#sim-canvas"),
     start: parseRequired("#start"),
     pause: parseRequired("#pause"),
@@ -243,6 +255,14 @@ export function bootApp(): void {
     if (nextState !== null) {
       decodedState = nextState;
     }
+    const m = frame.metrics;
+    const alive = m.popFire + m.popWater + m.popGrass;
+    ui.runInfo.innerHTML =
+      `run ${escapeHtml(frame.runId)} | tick ${frame.tick} | backend ${frame.backend} | ` +
+      `cells ${alive} (` +
+      `<span class="run-info-fire">F ${m.popFire}</span> / ` +
+      `<span class="run-info-water">W ${m.popWater}</span> / ` +
+      `<span class="run-info-grass">G ${m.popGrass}</span>)`;
     renderFrame();
   }
 
