@@ -1,4 +1,4 @@
-# CA Sim Bend CLI
+# CA Sim
 
 ### TL;DR
 
