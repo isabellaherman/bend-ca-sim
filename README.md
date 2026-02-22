@@ -28,25 +28,6 @@ What I would like to acchieve: move the live loop to Bend.
 - Bend is integrated in parity/benchmarking validation (when installed).
 - The goal is to plug Bend in as a live backend too.
 
-## V1 Control Contract (Backend-neutral)
-
-The control semantics below are the project contract for any live backend (JS now, Bend live later):
-
-- `Start`: if no run exists, create and start; if paused, resume same run; if already running, no-op.
-- `Pause`: pauses only when running; otherwise no-op.
-- `Resume`: resumes only when paused; otherwise no-op.
-- `Reset`: valid only when a run exists; rebuilds same seed+config and preserves play state.
-- `Reset` with no run: explicit server error (and disabled in main UI).
-- `Step`: kept as debug API compatibility, hidden from V1 main UI.
-- Server is source of truth for run phase (`idle|running|paused`) and run state.
-
-Session continuity:
-
-- Viewer uses a persistent `clientId` (localStorage) and reconnects with `?clientId=...`.
-- Bridge keeps session state by `clientId` (default retention: 15 minutes).
-- Simulation does not advance while client is disconnected.
-- Reconnect with same `clientId` restores phase + last frame deterministically.
-
 ## Simulation Rules
 
 ### Energy scale
