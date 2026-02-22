@@ -1,4 +1,4 @@
-# CA Sim Bend
+# Bend Cellular Automata Simulator
 
 ### TL;DR
 
